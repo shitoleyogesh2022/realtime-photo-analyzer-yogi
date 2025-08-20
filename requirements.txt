@@ -1,0 +1,8 @@
+streamlit
+torch
+torchvision
+Pillow
+numpy
+opencv-python-headless
+streamlit-webrtc
+av
