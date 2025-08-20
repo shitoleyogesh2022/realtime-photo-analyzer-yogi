@@ -1,160 +1,149 @@
 import streamlit as st
-import cv2
-import numpy as np
-from PIL import Image
 import os
-from datetime import datetime
 from analyzer import AIPhotoAnalyzer
-from config import *
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+from datetime import datetime
+import cv2
+from PIL import Image
+import numpy as np
 
-def init_session_state():
-    """Initialize session state variables"""
-    if 'analyzer' not in st.session_state:
-        st.session_state.analyzer = AIPhotoAnalyzer()
-    if 'current_image' not in st.session_state:
-        st.session_state.current_image = None
-    if 'current_analysis' not in st.session_state:
-        st.session_state.current_analysis = None
+# App configuration
+APP_TITLE = "📸 Real-time Photography Assistant"
+APP_DESCRIPTION = "Use your camera to get instant photography feedback!"
+UPLOAD_DIR = "uploads"
+ANALYSIS_DIR = "analysis"
+
+# Ensure directories exist
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(ANALYSIS_DIR, exist_ok=True)
+
+class VideoTransformer(VideoProcessorBase):
+    def __init__(self):
+        self.analyzer = AIPhotoAnalyzer()
+        self.last_analysis = None
+        self.current_frame = None
+        self.frame_skip = 30
+        self.frame_count = 0
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        self.current_frame = img.copy()
+        
+        self.frame_count += 1
+        if self.frame_count % self.frame_skip == 0:
+            try:
+                self.last_analysis = self.analyzer.analyze_image(self.current_frame)
+            except Exception as e:
+                st.error(f"Analysis error: {str(e)}")
+        
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+def save_captured_photo(frame, analysis):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    image_path = os.path.join(UPLOAD_DIR, f"photo_{timestamp}.jpg")
+    analysis_path = os.path.join(ANALYSIS_DIR, f"analysis_{timestamp}.txt")
+    
+    cv2.imwrite(image_path, frame)
+    
+    with open(analysis_path, 'w') as f:
+        f.write(str(analysis))
+    
+    return image_path, analysis_path
 
 def display_analysis(analysis):
-    """Display analysis results in a user-friendly format"""
     if not analysis:
         return
-
-    # Overall Score
-    score = analysis['overall_score']
-    st.markdown(f"### Overall Score: {score:.0%}")
-    st.progress(score)
-
-    # Detailed Analysis in expandable sections
-    with st.expander("📊 Detailed Analysis"):
-        # Composition
-        st.markdown("#### Composition")
-        comp = analysis['composition']
-        st.markdown(f"- Rule of Thirds: {comp['thirds']:.0%}")
-        st.markdown(f"- Symmetry: {comp['symmetry']:.0%}")
-
-        # Lighting
-        st.markdown("#### Lighting")
-        light = analysis['lighting']
-        st.markdown(f"- Brightness: {light['brightness']:.0%}")
-        st.markdown(f"- Contrast: {light['contrast']:.0%}")
-
-        # Technical
-        st.markdown("#### Technical Quality")
-        tech = analysis['technical']
-        st.markdown(f"- Sharpness: {tech['sharpness']:.0%}")
-        st.markdown(f"- Noise Level: {1 - tech['noise']:.0%}")
-
-def generate_suggestions(analysis):
-    """Generate improvement suggestions based on analysis"""
-    suggestions = []
     
-    if analysis['lighting']['brightness'] < 0.3:
-        suggestions.append("🔆 Scene is too dark. Try adding more light.")
-    elif analysis['lighting']['brightness'] > 0.7:
-        suggestions.append("⚠️ Scene might be overexposed. Reduce brightness.")
-        
-    if analysis['composition']['thirds'] < 0.4:
-        suggestions.append("📐 Try applying the rule of thirds for better composition.")
-        
-    if analysis['technical']['sharpness'] < 0.4:
-        suggestions.append("🎯 Image is not sharp. Check focus or reduce movement.")
+    st.write("**Scene Detection:**")
+    for scene, prob in analysis['scene_type']:
+        st.write(f"- {scene}: {prob:.2%}")
     
-    return suggestions
+    st.write("**Composition Analysis:**")
+    comp = analysis['composition_score']
+    st.write(f"- Overall Score: {comp['score']:.2%}")
+    st.write(f"- Edge Definition: {comp['edge_density']:.2%}")
+    st.write(f"- Symmetry: {comp['symmetry']:.2%}")
+    st.write(f"- Rule of Thirds: {comp['thirds_alignment']:.2%}")
+    
+    st.write("**Lighting Analysis:**")
+    light = analysis['lighting_quality']
+    st.write(f"- Overall Score: {light['score']:.2%}")
+    st.write(f"- Brightness: {light['brightness']:.2%}")
+    st.write(f"- Contrast: {light['contrast']:.2%}")
+    st.write(f"- Color Balance: {light['color_balance']:.2%}")
 
 def main():
-    st.set_page_config(
-        page_title=APP_TITLE,
-        page_icon="📸",
-        layout="wide" if not any(agent in st.user_agent.lower() 
-                               for agent in ['android', 'iphone', 'ipad', 'mobile']) 
-        else "centered"
-    )
-
-    init_session_state()
-
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    
     st.title(APP_TITLE)
-    st.markdown(APP_DESCRIPTION)
+    st.write(APP_DESCRIPTION)
 
-    # Input method selection
-    input_method = st.radio(
-        "Choose input method:",
-        ["Upload Photo", "Take Photo"],
-        horizontal=True
-    )
-
-    if input_method == "Upload Photo":
-        uploaded_file = st.file_uploader(
-            "Choose an image...",
-            type=['jpg', 'jpeg', 'png']
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        webrtc_ctx = webrtc_streamer(
+            key="photography_assistant",
+            video_processor_factory=VideoTransformer,
+            async_processing=True,
+            rtc_configuration=RTCConfiguration(
+                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            )
         )
-        
-        if uploaded_file:
-            image = Image.open(uploaded_file)
-            st.session_state.current_image = image
-            st.image(image, use_column_width=True)
-            
-            if st.button("Analyze Photo"):
-                with st.spinner("Analyzing..."):
-                    st.session_state.current_analysis = (
-                        st.session_state.analyzer.analyze_image(image)
+
+    with col2:
+        if st.button("📸 Capture Photo"):
+            if webrtc_ctx.video_processor and webrtc_ctx.video_processor.current_frame is not None:
+                try:
+                    image_path, analysis_path = save_captured_photo(
+                        webrtc_ctx.video_processor.current_frame,
+                        webrtc_ctx.video_processor.last_analysis
                     )
+                    
+                    st.success(f"Photo captured and saved!")
+                    
+                    captured_image = cv2.imread(image_path)
+                    captured_image = cv2.cvtColor(captured_image, cv2.COLOR_BGR2RGB)
+                    st.image(captured_image, caption="Captured Photo", use_column_width=True)
+                    
+                    with open(image_path, 'rb') as file:
+                        st.download_button(
+                            label="Download Photo",
+                            data=file,
+                            file_name=os.path.basename(image_path),
+                            mime="image/jpeg"
+                        )
+                    
+                    with open(analysis_path, 'rb') as file:
+                        st.download_button(
+                            label="Download Analysis Report",
+                            data=file,
+                            file_name=os.path.basename(analysis_path),
+                            mime="text/plain"
+                        )
+                    
+                except Exception as e:
+                    st.error(f"Error capturing photo: {str(e)}")
+            else:
+                st.warning("Camera not ready. Please wait a moment and try again.")
 
-    else:  # Take Photo
-        picture = st.camera_input("Take a picture")
+    if webrtc_ctx.video_processor:
+        analysis_placeholder = st.empty()
         
-        if picture:
-            image = Image.open(picture)
-            st.session_state.current_image = image
-            
-            with st.spinner("Analyzing..."):
-                st.session_state.current_analysis = (
-                    st.session_state.analyzer.analyze_image(image)
-                )
+        if webrtc_ctx.video_processor.last_analysis:
+            with analysis_placeholder.container():
+                display_analysis(webrtc_ctx.video_processor.last_analysis)
 
-    # Display analysis if available
-    if st.session_state.current_analysis:
-        display_analysis(st.session_state.current_analysis)
+    with st.expander("About"):
+        st.write("""
+        This real-time photography assistant helps you:
+        - Analyze scene composition
+        - Check lighting conditions
+        - Monitor technical quality
+        - Get instant feedback
         
-        suggestions = generate_suggestions(st.session_state.current_analysis)
-        if suggestions:
-            st.markdown("### 💡 Suggestions for Improvement")
-            for suggestion in suggestions:
-                st.info(suggestion)
-
-        # Save results
-        if st.button("Save Results"):
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Save image
-            image_path = os.path.join(UPLOAD_DIR, f"photo_{timestamp}.jpg")
-            st.session_state.current_image.save(image_path)
-            
-            # Save analysis
-            analysis_path = os.path.join(ANALYSIS_DIR, f"analysis_{timestamp}.txt")
-            with open(analysis_path, 'w') as f:
-                f.write(str(st.session_state.current_analysis))
-            
-            st.success("Results saved successfully!")
-
-    # Help section
-    with st.expander("ℹ️ Help"):
-        st.markdown("""
-        ### How to use this app:
-        1. Choose to either upload a photo or take a new one
-        2. Wait for the automatic analysis
-        3. Review the scores and suggestions
-        4. Save the results if desired
-        
-        ### What we analyze:
-        - Composition (rule of thirds, symmetry)
-        - Lighting (brightness, contrast)
-        - Technical quality (sharpness, noise)
+        Use the camera preview to compose your shot, then click 'Capture Photo' to save it with detailed analysis.
         """)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
+    main()
