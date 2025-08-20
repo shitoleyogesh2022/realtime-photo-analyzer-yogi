@@ -1,3 +1,0 @@
-git rm packages.txt
-git commit -m "Remove problematic packages.txt"
-git push origin main
